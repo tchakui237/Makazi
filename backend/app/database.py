@@ -36,11 +36,15 @@ else:
 # Le paramètre check_same_thread est obligatoire pour SQLite 
 # mais provoque une erreur fatale sur PostgreSQL. On le rend conditionnel.
 connect_args = {"check_same_thread": False} if is_sqlite else {}
+from sqlalchemy.pool import NullPool
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args=connect_args
+    connect_args=connect_args,
+    poolclass=NullPool if not is_sqlite else None,
 )
+
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
