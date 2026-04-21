@@ -2,9 +2,10 @@
 Makazi — Point d'entrée de l'API FastAPI.
 
 Corrections appliquées :
-- get_stats() : champs alignés sur StatsResponse (total_entries, average_price, r_squared)
-- Route /distribution/ ajoutée (manquante, causait un 404 depuis le frontend)
-- Slashes finaux cohérents sur toutes les routes
+- ml_engine.train() appelé au démarrage → R² calculé dès le lancement
+- ml_engine.train() rappelé après chaque POST /collect/ → R² toujours à jour
+- ml_engine.predict() utilisé dans /predict/ → prédictions OLS réelles
+- get_stats() retourne ml_engine.r_squared au lieu de None
 """
 
 import os
@@ -15,24 +16,36 @@ from sqlalchemy.orm import Session
 from . import models, schemas, crud
 from .database import engine, get_db, SessionLocal
 from .seed import seed_database
+from .ml import ml_engine
 
 # ── Création des tables ───────────────────────────────────────
 models.Base.metadata.create_all(bind=engine)
 
-# ── Seed automatique (idempotent) ─────────────────────────────
+# ── Seed + entraînement initial ───────────────────────────────
 db = SessionLocal()
 try:
     if db.query(models.Apartment).count() == 0:
         print("Base de données vide. Lancement du seed...")
         seed_database(db)
         print("Seed terminé avec succès !")
+
+    # Entraînement du modèle OLS au démarrage
+    print("Entraînement du modèle OLS...")
+    ml_engine.train(db)
+    if ml_engine.r_squared is not None:
+        print(f"Modèle entraîné — R² = {ml_engine.r_squared:.4f}")
+    else:
+        print("Données insuffisantes pour entraîner le modèle (< 10 entrées).")
 except Exception as e:
-    print(f"Erreur Seed: {e}")
+    print(f"Erreur au démarrage: {e}")
 finally:
     db.close()
 
 # ── Application FastAPI ───────────────────────────────────────
-app = FastAPI(title="Makazi API", description="API de prédiction des prix de loyer à Yaoundé")
+app = FastAPI(
+    title="Makazi API",
+    description="API de prédiction des prix de loyer à Yaoundé",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,37 +65,42 @@ def read_root():
 
 @app.post("/collect/", response_model=schemas.ApartmentOut)
 def collect_apartment(apartment: schemas.ApartmentCreate, db: Session = Depends(get_db)):
-    return crud.create_apartment(db=db, apartment=apartment)
+    result = crud.create_apartment(db=db, apartment=apartment)
+    # Ré-entraînement du modèle après chaque nouvelle entrée
+    try:
+        ml_engine.train(db)
+    except Exception as e:
+        print(f"Avertissement : ré-entraînement échoué après collecte — {e}")
+    return result
 
 
-# ── Prédiction ────────────────────────────────────────────────
+# ── Prédiction (OLS réel via ml_engine) ──────────────────────
 
 @app.post("/predict/", response_model=schemas.PredictionResponse)
 def predict_price(features: schemas.PredictionRequest, db: Session = Depends(get_db)):
-    apartments = crud.get_apartments(db, limit=1000)
-    if len(apartments) < 2:
-        raise HTTPException(status_code=400, detail="Collectez au moins 2 entrées.")
+    # Si le modèle n'est pas entraîné, on tente un entraînement à la volée
+    if ml_engine.model is None:
+        ml_engine.train(db)
 
-    reference = [a for a in apartments if a.type_quartier == features.type_quartier]
-    if len(reference) < 2:
-        reference = apartments
+    if ml_engine.model is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Données insuffisantes pour prédire. Collectez au moins 10 entrées.",
+        )
 
-    avg_price = sum(a.loyer for a in reference) / len(reference)
-    avg_rooms = sum(a.chambres for a in reference) / len(reference)
-    prediction = avg_price * (features.chambres / max(1, avg_rooms))
+    try:
+        result = ml_engine.predict(features.model_dump())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur de prédiction : {e}")
 
     return schemas.PredictionResponse(
-        predicted_price=round(prediction, 2),
-        lower_bound=round(prediction * 0.85, 2),
-        upper_bound=round(prediction * 1.15, 2),
+        predicted_price=result["predicted_price"],
+        lower_bound=result["lower_bound"],
+        upper_bound=result["upper_bound"],
     )
 
 
-# ── Statistiques ─────────────────────────────────────────────
-# CORRECTION BUG 2 : les champs retournés sont maintenant alignés sur
-# StatsResponse (total_entries, average_price, r_squared).
-# L'ancienne version envoyait total_count / median_price / min_price / max_price
-# qui n'existent pas dans le schéma → ValidationError Pydantic → 500.
+# ── Statistiques ──────────────────────────────────────────────
 
 @app.get("/stats/", response_model=schemas.StatsResponse)
 def get_stats(db: Session = Depends(get_db)):
@@ -98,15 +116,15 @@ def get_stats(db: Session = Depends(get_db)):
 
     avg = sum(a.loyer for a in apartments) / total
 
+    # R² réel calculé par le modèle OLS — plus jamais None si les données existent
     return schemas.StatsResponse(
         total_entries=total,
         average_price=round(avg, 2),
-        r_squared=None,
+        r_squared=round(ml_engine.r_squared, 4) if ml_engine.r_squared is not None else None,
     )
 
 
 # ── Distribution ──────────────────────────────────────────────
-# CORRECTION BUG 3 : route manquante qui causait un 404 depuis api.ts.
 
 @app.get("/distribution/")
 def get_distribution(db: Session = Depends(get_db)):
