@@ -11,11 +11,11 @@ Ce module fournit :
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import NullPool
 
 # ──────────────────────────────────────────────────────────────
 # Configuration de l'URL de la base de données
 # ──────────────────────────────────────────────────────────────
-# 1. On cherche la variable d'environnement (ex: Supabase via Railway)
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 is_sqlite = False
@@ -25,7 +25,7 @@ if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 else:
-    # 2. Fallback local : Base SQLite sur ton Kali Linux
+    # Fallback local : Base SQLite
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATABASE_URL = f"sqlite:///{os.path.join(BASE_DIR, 'makazi.db')}"
     is_sqlite = True
@@ -33,18 +33,18 @@ else:
 # ──────────────────────────────────────────────────────────────
 # Création de l'Engine
 # ──────────────────────────────────────────────────────────────
-# Le paramètre check_same_thread est obligatoire pour SQLite 
-# mais provoque une erreur fatale sur PostgreSQL. On le rend conditionnel.
-connect_args = {"check_same_thread": False} if is_sqlite else {}
-from sqlalchemy.pool import NullPool
+# CORRECTION CRITIQUE : NullPool pour compatibilité PgBouncer (Supabase port 6543).
+# Le Transaction Pooler de Supabase fonctionne en "transaction mode" :
+# il réattribue les connexions entre chaque transaction.
+# Sans NullPool, SQLAlchemy maintient son propre pool par-dessus PgBouncer,
+# ce qui provoque des commits sur des connexions orphelines → données invisibles.
+# NullPool force SQLAlchemy à ouvrir/fermer une connexion propre par transaction.
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=connect_args,
-    poolclass=NullPool if not is_sqlite else None,
-)
-
-
+if is_sqlite:
+    connect_args = {"check_same_thread": False}
+    engine = create_engine(DATABASE_URL, connect_args=connect_args)
+else:
+    engine = create_engine(DATABASE_URL, poolclass=NullPool)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
