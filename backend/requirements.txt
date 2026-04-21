@@ -1,11 +1,8 @@
 fastapi
-uvicorn[standard]
+uvicorn
 sqlalchemy
-scikit-learn
-statsmodels
+psycopg2-binary
 pandas
-numpy
+statsmodels
 pydantic
-requests
-beautifulsoup4
-thefuzz[speedup]
+scikit-learn
