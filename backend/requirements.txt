@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+scikit-learn
+statsmodels
+pandas
+numpy
+pydantic
+requests
+beautifulsoup4
+thefuzz[speedup]
